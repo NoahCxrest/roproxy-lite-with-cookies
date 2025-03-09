@@ -5,7 +5,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/valyala/fasthttp"
@@ -16,16 +15,6 @@ var retries, _ = strconv.Atoi(os.Getenv("RETRIES"))
 var port = os.Getenv("PORT")
 
 var client *fasthttp.Client
-
-type CacheEntry struct {
-	ExpiresAt  time.Time
-	StatusCode int
-	Headers    map[string]string
-	Body       []byte
-}
-
-var cache sync.Map
-var cacheDuration = 5 * time.Minute
 
 func main() {
 	h := requestHandler
@@ -55,24 +44,8 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	url := strings.SplitN(string(ctx.Request.Header.RequestURI())[1:], "/", 2)
-	fullURL := "https://" + url[0] + ".roblox.com/" + url[1]
-	cacheKey := fullURL + "|" + string(ctx.Request.Header.Peek("Cookie"))
+	response := makeRequest(ctx, 1)
 
-	if entry, found := cache.Load(cacheKey); found {
-		cacheEntry := entry.(CacheEntry)
-		if time.Now().Before(cacheEntry.ExpiresAt) {
-			ctx.SetStatusCode(cacheEntry.StatusCode)
-			ctx.SetBody(cacheEntry.Body)
-			for k, v := range cacheEntry.Headers {
-				ctx.Response.Header.Set(k, v)
-			}
-			return
-		}
-		cache.Delete(cacheKey)
-	}
-
-	response := makeRequest(ctx, 1, cacheKey)
 	defer fasthttp.ReleaseResponse(response)
 
 	body := response.Body()
@@ -83,7 +56,7 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 	})
 }
 
-func makeRequest(ctx *fasthttp.RequestCtx, attempt int, cacheKey string) *fasthttp.Response {
+func makeRequest(ctx *fasthttp.RequestCtx, attempt int) *fasthttp.Response {
 	if attempt > retries {
 		resp := fasthttp.AcquireResponse()
 		resp.SetBody([]byte("Proxy failed to connect. Please try again."))
@@ -110,22 +83,7 @@ func makeRequest(ctx *fasthttp.RequestCtx, attempt int, cacheKey string) *fastht
 
 	if err != nil {
 		fasthttp.ReleaseResponse(resp)
-		return makeRequest(ctx, attempt+1, cacheKey)
+		return makeRequest(ctx, attempt+1)
 	}
-
-	if resp.StatusCode() == 200 {
-		headers := make(map[string]string)
-		resp.Header.VisitAll(func(key, value []byte) {
-			headers[string(key)] = string(value)
-		})
-
-		cache.Store(cacheKey, CacheEntry{
-			ExpiresAt:  time.Now().Add(cacheDuration),
-			StatusCode: resp.StatusCode(),
-			Headers:    headers,
-			Body:       append([]byte(nil), resp.Body()...),
-		})
-	}
-
 	return resp
 }
